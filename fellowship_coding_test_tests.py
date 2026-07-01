@@ -1,8 +1,9 @@
 # Public tests for fellowship_coding_test.ipynb.
 import __main__
+import time
 import traceback
 from dataclasses import dataclass
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable
 
 import torch
 from torch import nn
@@ -91,14 +92,51 @@ def _integer_handles_duplicates_independently():
     assert container.add(10) == 1
 
 
+def _integer_get_most_frequent_values_and_ties():
+    solutions = load_solutions('IntegerContainerImpl')
+    container = solutions.IntegerContainerImpl()
+    assert container.get_most_frequent() is None
+    container.add(5)
+    container.add(5)
+    container.add(3)
+    assert container.get_most_frequent() == 5
+    container.add(3)
+    container.add(3)  # 3 now has count 3, 5 has count 2
+    assert container.get_most_frequent() == 3
+    # Ties are broken by the smallest value.
+    tie = solutions.IntegerContainerImpl()
+    tie.add(9)
+    tie.add(2)
+    assert tie.get_most_frequent() == 2
+    tie.delete(2)
+    assert tie.get_most_frequent() == 9
+
+
+def _integer_get_most_frequent_is_efficient():
+    solutions = load_solutions('IntegerContainerImpl')
+    container = solutions.IntegerContainerImpl()
+    # Interleaving adds with queries must stay fast; an O(n) rescan per query
+    # (e.g. Counter(list) or max(set, key=list.count)) blows past this budget.
+    num_ops = 60000
+    num_distinct = 600
+    start = time.perf_counter()
+    for i in range(num_ops):
+        container.add(i % num_distinct)
+        container.get_most_frequent()
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0, f'get_most_frequent too slow: {elapsed:.2f}s for {num_ops} interleaved ops'
+
+
 INTEGER_CONTAINER_TESTS = [
-    ScoredTest('add returns the updated count', 5, _integer_adds_return_count),
-    ScoredTest('delete handles present and missing values', 5, _integer_deletes_present_and_missing_values),
-    ScoredTest('duplicates are stored and deleted independently', 5, _integer_handles_duplicates_independently),
+    ScoredTest('add returns the updated count', 4, _integer_adds_return_count),
+    ScoredTest('delete handles present and missing values', 4, _integer_deletes_present_and_missing_values),
+    ScoredTest('duplicates are stored and deleted independently', 3, _integer_handles_duplicates_independently),
+    ScoredTest('get_most_frequent returns the mode and breaks ties by smallest value', 2, _integer_get_most_frequent_values_and_ties),
+    ScoredTest('get_most_frequent stays efficient under many interleaved ops', 2, _integer_get_most_frequent_is_efficient),
 ]
 
 
-# Question 2: top_k_frequent_words — 15 points.
+# Question 2: top_k_frequent_words — 10 points.
 def _top_k_basic_frequency_order():
     solutions = load_solutions('top_k_frequent_words')
     words = ['arena', 'base', 'arena', 'model', 'base', 'arena']
@@ -119,13 +157,13 @@ def _top_k_edge_cases():
 
 
 TOP_K_FREQUENT_TESTS = [
-    ScoredTest('orders by descending frequency', 5, _top_k_basic_frequency_order),
-    ScoredTest('breaks frequency ties alphabetically', 5, _top_k_ties_are_alphabetical),
-    ScoredTest('handles k larger than unique count and empty inputs', 5, _top_k_edge_cases),
+    ScoredTest('orders by descending frequency', 4, _top_k_basic_frequency_order),
+    ScoredTest('breaks frequency ties alphabetically', 3, _top_k_ties_are_alphabetical),
+    ScoredTest('handles k larger than unique count and empty inputs', 3, _top_k_edge_cases),
 ]
 
 
-# Question 3: PyTorch basics — 20 points.
+# Question 3: PyTorch basics — 15 points.
 def _normalize_rows_values_and_zero_rows():
     solutions = load_solutions('normalize_rows')
     x = torch.tensor([[3.0, 4.0], [1.0, 2.0], [0.0, 0.0]])
@@ -167,13 +205,13 @@ def _make_tiny_mlp_structure_and_forward():
 
 
 PYTORCH_BASICS_TESTS = [
-    ScoredTest('normalize_rows returns correct values and preserves zero rows', 7, _normalize_rows_values_and_zero_rows),
-    ScoredTest('normalize_rows preserves shape, input values, and gradients', 7, _normalize_rows_shape_no_mutation_and_gradients),
-    ScoredTest('make_tiny_mlp returns the requested module and forward shape', 6, _make_tiny_mlp_structure_and_forward),
+    ScoredTest('normalize_rows returns correct values and preserves zero rows', 5, _normalize_rows_values_and_zero_rows),
+    ScoredTest('normalize_rows preserves shape, input values, and gradients', 5, _normalize_rows_shape_no_mutation_and_gradients),
+    ScoredTest('make_tiny_mlp returns the requested module and forward shape', 5, _make_tiny_mlp_structure_and_forward),
 ]
 
 
-# Question 4: masked_softmax — 25 points.
+# Question 4: masked_softmax — 20 points.
 def _masked_softmax_basic_values():
     solutions = load_solutions('masked_softmax')
     scores = torch.tensor([[1.0, 2.0, 3.0]])
@@ -218,34 +256,40 @@ def _masked_softmax_no_mutation_and_gradients():
     assert torch.isfinite(scores.grad).all()
 
 
+def _masked_softmax_honors_dim_and_survives_masked_slices():
+    # `dim` must actually be used: normalization here is down the columns
+    # (dim=0), which trips implementations that hard-code softmax(..., dim=-1).
+    # Column 2 is fully masked, so gradients must also stay finite for a slice
+    # that sums to zero.
+    solutions = load_solutions('masked_softmax')
+    scores = torch.tensor([[1.0, 2.0, 3.0],
+                           [4.0, 5.0, 6.0]], requires_grad=True)
+    mask = torch.tensor([[True, True, False],
+                         [True, False, False]])
+    out = solutions.masked_softmax(scores, mask, dim=0)
+    assert out.shape == scores.shape
+    # Column 0 softmaxes over rows [1, 4]; column 1 has a single valid entry.
+    expected = torch.tensor([[0.04742587, 1.0, 0.0],
+                             [0.95257413, 0.0, 0.0]])
+    _assert_close(out, expected)
+    _assert_close(out.sum(dim=0), torch.tensor([1.0, 1.0, 0.0]))
+    out.sum().backward()
+    assert scores.grad is not None
+    assert torch.isfinite(scores.grad).all(), 'gradients must stay finite even with fully-masked slices'
+
+
 MASKED_SOFTMAX_TESTS = [
-    ScoredTest('matches expected values on a simple attention mask', 6, _masked_softmax_basic_values),
-    ScoredTest('supports broadcast masks and row sums', 7, _masked_softmax_rows_sum_and_masked_are_zero),
-    ScoredTest('all-masked rows return zeros without NaNs', 6, _masked_softmax_handles_all_masked_rows_without_nan),
-    ScoredTest('does not mutate scores and preserves gradients', 6, _masked_softmax_no_mutation_and_gradients),
+    ScoredTest('matches expected values on a simple attention mask', 5, _masked_softmax_basic_values),
+    ScoredTest('supports broadcast masks and row sums', 5, _masked_softmax_rows_sum_and_masked_are_zero),
+    ScoredTest('all-masked rows return zeros without NaNs', 4, _masked_softmax_handles_all_masked_rows_without_nan),
+    ScoredTest('does not mutate scores and preserves gradients', 3, _masked_softmax_no_mutation_and_gradients),
+    ScoredTest('honors the dim argument and keeps gradients finite on masked slices', 3, _masked_softmax_honors_dim_and_survives_masked_slices),
 ]
 
 
-# Question 5: top_p_probs — 25 points.
-def _reference_top_p_probs(logits, top_p=0.9, temperature=1.0):
-    if temperature <= 0:
-        raise ValueError('temperature must be positive')
-    if not (0 < top_p <= 1):
-        raise ValueError('top_p must be in (0, 1]')
-    probs = torch.softmax(logits / temperature, dim=-1)
-    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-    cumulative = torch.cumsum(sorted_probs, dim=-1)
-    keep_sorted = cumulative <= top_p
-    keep_sorted[0] = True
-    first_over = torch.nonzero(cumulative >= top_p, as_tuple=False)
-    if len(first_over) > 0:
-        keep_sorted[first_over[0].item()] = True
-    keep = torch.zeros_like(keep_sorted, dtype=torch.bool)
-    keep.scatter_(0, sorted_indices, keep_sorted)
-    filtered = torch.where(keep, probs, torch.zeros_like(probs))
-    return filtered / filtered.sum()
-
-
+# Question 5: top_p_probs — 20 points.
+# Expected outputs below are precomputed with a numerically stable reference
+# implementation. Match the documented behavior rather than any single library.
 def _top_p_probs_sums_and_shape():
     solutions = load_solutions('top_p_probs')
     logits = torch.tensor([4.0, 3.0, 1.0, 0.0])
@@ -259,7 +303,7 @@ def _top_p_probs_matches_reference_and_preserves_order():
     solutions = load_solutions('top_p_probs')
     logits = torch.tensor([0.0, 5.0, 1.0, 4.0, -1.0])
     out = solutions.top_p_probs(logits, top_p=0.85, temperature=1.0)
-    expected = _reference_top_p_probs(logits, top_p=0.85, temperature=1.0)
+    expected = torch.tensor([0.0, 0.73105860, 0.0, 0.26894143, 0.0])
     _assert_close(out, expected)
     assert out[1] > 0
     assert out[3] > 0
@@ -274,8 +318,8 @@ def _top_p_probs_temperature_changes_distribution():
     assert cold.argmax().item() == hot.argmax().item() == 0
     assert cold[0] > hot[0]
     assert hot[-1] > cold[-1]
-    _assert_close(cold, _reference_top_p_probs(logits, top_p=1.0, temperature=0.5))
-    _assert_close(hot, _reference_top_p_probs(logits, top_p=1.0, temperature=2.0))
+    _assert_close(cold, torch.tensor([0.64391428, 0.23688282, 0.08714432, 0.03205860]))
+    _assert_close(hot, torch.tensor([0.34993201, 0.27252734, 0.21224450, 0.16529618]))
 
 
 def _top_p_probs_validates_inputs_and_keeps_one_token():
@@ -293,11 +337,60 @@ def _top_p_probs_validates_inputs_and_keeps_one_token():
             raise AssertionError(f'Expected ValueError for {kwargs}')
 
 
+def _top_p_probs_is_numerically_stable():
+    # Large logits must not overflow. A hand-rolled softmax that calls .exp()
+    # without subtracting the max produces inf/NaN here; a stable implementation
+    # returns the same finite distribution as for the equivalent small gap.
+    solutions = load_solutions('top_p_probs')
+    logits = torch.tensor([100.0, 99.0, 1.0, 0.0])
+    out = solutions.top_p_probs(logits, top_p=0.9, temperature=1.0)
+    assert torch.isfinite(out).all(), 'output must stay finite for large logits'
+    _assert_close(out.sum(), torch.tensor(1.0))
+    expected = torch.tensor([0.73105860, 0.26894143, 0.0, 0.0])
+    _assert_close(out, expected)
+
+
 TOP_P_PROBS_TESTS = [
-    ScoredTest('returns a same-shape probability vector that sums to 1', 5, _top_p_probs_sums_and_shape),
-    ScoredTest('matches top-p filtering and preserves token order', 8, _top_p_probs_matches_reference_and_preserves_order),
-    ScoredTest('temperature changes the distribution correctly', 6, _top_p_probs_temperature_changes_distribution),
-    ScoredTest('validates inputs and keeps at least one token', 6, _top_p_probs_validates_inputs_and_keeps_one_token),
+    ScoredTest('returns a same-shape probability vector that sums to 1', 4, _top_p_probs_sums_and_shape),
+    ScoredTest('matches top-p filtering and preserves token order', 5, _top_p_probs_matches_reference_and_preserves_order),
+    ScoredTest('temperature changes the distribution correctly', 4, _top_p_probs_temperature_changes_distribution),
+    ScoredTest('validates inputs and keeps at least one token', 4, _top_p_probs_validates_inputs_and_keeps_one_token),
+    ScoredTest('stays numerically stable for large logits', 3, _top_p_probs_is_numerically_stable),
+]
+
+
+# Question 6: apply_bpe_merge — 20 points.
+def _bpe_basic_merges():
+    solutions = load_solutions('apply_bpe_merge')
+    assert solutions.apply_bpe_merge(['a', 'b', 'a', 'b'], ('a', 'b')) == ['ab', 'ab']
+    assert solutions.apply_bpe_merge(['l', 'o', 'w', 'e', 's', 't'], ('e', 's')) == ['l', 'o', 'w', 'es', 't']
+    assert solutions.apply_bpe_merge(['a', 'b', 'a', 'b', 'a', 'b'], ('a', 'b')) == ['ab', 'ab', 'ab']
+
+
+def _bpe_non_overlapping_single_pass():
+    solutions = load_solutions('apply_bpe_merge')
+    # Non-overlapping, left to right.
+    assert solutions.apply_bpe_merge(['a', 'a', 'a', 'a'], ('a', 'a')) == ['aa', 'aa']
+    assert solutions.apply_bpe_merge(['a', 'a', 'a'], ('a', 'a')) == ['aa', 'a']
+    # A token produced by a merge must not be merged again in the same pass.
+    assert solutions.apply_bpe_merge(['a', 'a', 'b'], ('a', 'a')) == ['aa', 'b']
+    assert solutions.apply_bpe_merge(['t', 'h', 'e', 'h', 'e'], ('h', 'e')) == ['t', 'he', 'he']
+
+
+def _bpe_edge_cases_and_no_mutation():
+    solutions = load_solutions('apply_bpe_merge')
+    assert solutions.apply_bpe_merge([], ('a', 'b')) == []
+    assert solutions.apply_bpe_merge(['x', 'y', 'z'], ('a', 'b')) == ['x', 'y', 'z']
+    assert solutions.apply_bpe_merge(['a'], ('a', 'b')) == ['a']
+    original = ['a', 'b', 'a', 'b']
+    solutions.apply_bpe_merge(original, ('a', 'b'))
+    assert original == ['a', 'b', 'a', 'b'], 'input list must not be mutated'
+
+
+BPE_MERGE_TESTS = [
+    ScoredTest('merges adjacent pairs left to right', 6, _bpe_basic_merges),
+    ScoredTest('is non-overlapping and applies a single pass', 7, _bpe_non_overlapping_single_pass),
+    ScoredTest('handles empty/no-match inputs without mutating the input', 7, _bpe_edge_cases_and_no_mutation),
 ]
 
 
@@ -307,6 +400,7 @@ ALL_TEST_GROUPS = [
     ('Question 3 — Basic PyTorch', PYTORCH_BASICS_TESTS),
     ('Question 4 — Masked attention softmax', MASKED_SOFTMAX_TESTS),
     ('Question 5 — Temperature and top-p probabilities', TOP_P_PROBS_TESTS),
+    ('Question 6 — Byte-pair merge step', BPE_MERGE_TESTS),
 ]
 
 
@@ -338,6 +432,10 @@ def run_masked_softmax_tests():
 
 def run_top_p_probs_tests():
     return _run_scored_tests(TOP_P_PROBS_TESTS)
+
+
+def run_bpe_merge_tests():
+    return _run_scored_tests(BPE_MERGE_TESTS)
 
 
 def run_all_tests():
