@@ -212,7 +212,7 @@ PYTORCH_BASICS_TESTS = [
 
 
 # Question 4: masked_softmax — 20 points.
-def _masked_softmax_basic_values():
+def _masked_softmax_bool_basic_values():
     solutions = load_solutions('masked_softmax')
     scores = torch.tensor([[1.0, 2.0, 3.0]])
     mask = torch.tensor([[True, False, True]])
@@ -221,15 +221,20 @@ def _masked_softmax_basic_values():
     _assert_close(out, expected)
 
 
-def _masked_softmax_rows_sum_and_masked_are_zero():
+def _masked_softmax_bool_broadcast_and_dim():
     solutions = load_solutions('masked_softmax')
-    torch.manual_seed(1)
-    scores = torch.randn(2, 3, 4)
-    mask = torch.tensor([[[True, True, False, False]], [[False, True, True, False]]])
-    out = solutions.masked_softmax(scores, mask, dim=-1)
-    assert out.shape == scores.shape
-    assert torch.all(out.masked_select(~mask.expand_as(out)) == 0)
-    _assert_close(out.sum(dim=-1), torch.ones(2, 3))
+    scores = torch.tensor([[1.0, 2.0, 3.0],
+                           [4.0, 5.0, 6.0]], requires_grad=True)
+    mask = torch.tensor([[True, True, False],
+                         [True, False, False]])
+    out = solutions.masked_softmax(scores, mask, dim=0)
+    expected = torch.tensor([[0.04742587, 1.0, 0.0],
+                             [0.95257413, 0.0, 0.0]])
+    _assert_close(out, expected)
+    _assert_close(out.sum(dim=0), torch.tensor([1.0, 1.0, 0.0]))
+    out.sum().backward()
+    assert scores.grad is not None
+    assert torch.isfinite(scores.grad).all()
 
 
 def _masked_softmax_handles_all_masked_rows_without_nan():
@@ -242,48 +247,40 @@ def _masked_softmax_handles_all_masked_rows_without_nan():
     _assert_close(out[1], torch.tensor([0.0, 1.0, 0.0]))
 
 
-def _masked_softmax_no_mutation_and_gradients():
+def _masked_softmax_float_mask_finite_values_are_additive():
     solutions = load_solutions('masked_softmax')
-    scores = torch.tensor([[1.0, 2.0, 3.0], [0.5, -0.5, 1.5]], requires_grad=True)
-    original = scores.detach().clone()
-    mask = torch.tensor([[True, False, True], [True, True, False]])
-    out = solutions.masked_softmax(scores, mask)
-    _assert_close(scores.detach(), original)
-    loss = out[:, 0].sum()
-    loss.backward()
+    scores = torch.tensor([[1.0, 2.0, 3.0]])
+    additive = torch.tensor([[0.0, -1.0, 0.0]])
+    out = solutions.masked_softmax(scores, additive)
+    expected = torch.softmax(torch.tensor([[1.0, 1.0, 3.0]]), dim=-1)
+    _assert_close(out, expected)
+    assert torch.all(out > 0), 'finite additive mask values should not zero positions'
+
+
+def _masked_softmax_float_mask_neginf_and_all_masked_slices():
+    solutions = load_solutions('masked_softmax')
+    scores = torch.tensor([[1.0, 2.0, 3.0],
+                           [1.0, 2.0, 3.0]], requires_grad=True)
+    additive = torch.tensor([[0.0, float('-inf'), 0.0],
+                             [float('-inf'), float('-inf'), float('-inf')]])
+    out = solutions.masked_softmax(scores, additive)
+    expected = torch.tensor([[0.11920292, 0.0, 0.88079708],
+                             [0.0, 0.0, 0.0]])
+    assert not torch.isnan(out).any()
+    _assert_close(out, expected)
+    out.sum().backward()
     assert scores.grad is not None
-    assert scores.grad.shape == scores.shape
     assert torch.isfinite(scores.grad).all()
 
 
-def _masked_softmax_honors_dim_and_survives_masked_slices():
-    # `dim` must actually be used: normalization here is down the columns
-    # (dim=0), which trips implementations that hard-code softmax(..., dim=-1).
-    # Column 2 is fully masked, so gradients must also stay finite for a slice
-    # that sums to zero.
-    solutions = load_solutions('masked_softmax')
-    scores = torch.tensor([[1.0, 2.0, 3.0],
-                           [4.0, 5.0, 6.0]], requires_grad=True)
-    mask = torch.tensor([[True, True, False],
-                         [True, False, False]])
-    out = solutions.masked_softmax(scores, mask, dim=0)
-    assert out.shape == scores.shape
-    # Column 0 softmaxes over rows [1, 4]; column 1 has a single valid entry.
-    expected = torch.tensor([[0.04742587, 1.0, 0.0],
-                             [0.95257413, 0.0, 0.0]])
-    _assert_close(out, expected)
-    _assert_close(out.sum(dim=0), torch.tensor([1.0, 1.0, 0.0]))
-    out.sum().backward()
-    assert scores.grad is not None
-    assert torch.isfinite(scores.grad).all(), 'gradients must stay finite even with fully-masked slices'
-
-
 MASKED_SOFTMAX_TESTS = [
-    ScoredTest('matches expected values on a simple attention mask', 5, _masked_softmax_basic_values),
-    ScoredTest('supports broadcast masks and row sums', 5, _masked_softmax_rows_sum_and_masked_are_zero),
+    ScoredTest('boolean mask matches expected values', 4, _masked_softmax_bool_basic_values),
+    ScoredTest('boolean mask honors broadcasting, dim, and finite gradients', 4, _masked_softmax_bool_broadcast_and_dim),
     ScoredTest('all-masked rows return zeros without NaNs', 4, _masked_softmax_handles_all_masked_rows_without_nan),
-    ScoredTest('does not mutate scores and preserves gradients', 3, _masked_softmax_no_mutation_and_gradients),
-    ScoredTest('honors the dim argument and keeps gradients finite on masked slices', 3, _masked_softmax_honors_dim_and_survives_masked_slices),
+    ScoredTest('float masks are additive, including finite negative values', 5,
+               _masked_softmax_float_mask_finite_values_are_additive),
+    ScoredTest('float -inf masks zero positions and all-masked slices without NaNs', 3,
+               _masked_softmax_float_mask_neginf_and_all_masked_slices),
 ]
 
 
@@ -310,24 +307,48 @@ def _top_p_probs_matches_reference_and_preserves_order():
     assert out[0] == 0
 
 
-def _top_p_probs_temperature_changes_distribution():
+def _top_p_probs_min_tokens_floor_expands_tiny_nucleus():
     solutions = load_solutions('top_p_probs')
-    logits = torch.tensor([2.0, 1.5, 1.0, 0.5])
-    cold = solutions.top_p_probs(logits, top_p=1.0, temperature=0.5)
-    hot = solutions.top_p_probs(logits, top_p=1.0, temperature=2.0)
-    assert cold.argmax().item() == hot.argmax().item() == 0
-    assert cold[0] > hot[0]
-    assert hot[-1] > cold[-1]
-    _assert_close(cold, torch.tensor([0.64391428, 0.23688282, 0.08714432, 0.03205860]))
-    _assert_close(hot, torch.tensor([0.34993201, 0.27252734, 0.21224450, 0.16529618]))
+    logits = torch.tensor([4.0, 3.0, 0.0, -1.0])
+    out = solutions.top_p_probs(
+        logits,
+        top_p=0.2,
+        temperature=1.0,
+        min_tokens_to_keep=2,
+    )
+    expected = torch.tensor([0.73105860, 0.26894142, 0.0, 0.0])
+    _assert_close(out, expected)
+    assert torch.count_nonzero(out).item() == 2
 
 
-def _top_p_probs_validates_inputs_and_keeps_one_token():
+def _top_p_probs_top_p_can_keep_more_than_minimum():
     solutions = load_solutions('top_p_probs')
-    logits = torch.tensor([1.0, 0.0, -1.0])
-    out = solutions.top_p_probs(logits, top_p=0.01, temperature=1.0)
-    assert (out > 0).sum().item() == 1
-    _assert_close(out.sum(), torch.tensor(1.0))
+    logits = torch.tensor([2.0, 1.0, 0.0])
+    out = solutions.top_p_probs(
+        logits,
+        top_p=0.95,
+        temperature=1.0,
+        min_tokens_to_keep=1,
+    )
+    expected = torch.tensor([0.66524096, 0.24472848, 0.09003057])
+    _assert_close(out, expected)
+    assert torch.count_nonzero(out).item() == 3
+
+
+def _top_p_probs_validates_min_tokens_and_caps_at_vocab_size():
+    solutions = load_solutions('top_p_probs')
+    logits = torch.tensor([4.0, 3.0, 0.0])
+    out = solutions.top_p_probs(logits, top_p=0.01, min_tokens_to_keep=10)
+    expected = torch.softmax(logits, dim=-1)
+    _assert_close(out, expected)
+
+    try:
+        solutions.top_p_probs(logits, min_tokens_to_keep=0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('min_tokens_to_keep < 1 should raise ValueError')
+
     for kwargs in [{'temperature': 0.0}, {'temperature': -1.0}, {'top_p': 0.0}, {'top_p': 1.1}]:
         try:
             solutions.top_p_probs(logits, **kwargs)
@@ -337,60 +358,72 @@ def _top_p_probs_validates_inputs_and_keeps_one_token():
             raise AssertionError(f'Expected ValueError for {kwargs}')
 
 
-def _top_p_probs_is_numerically_stable():
-    # Large logits must not overflow. A hand-rolled softmax that calls .exp()
-    # without subtracting the max produces inf/NaN here; a stable implementation
-    # returns the same finite distribution as for the equivalent small gap.
-    solutions = load_solutions('top_p_probs')
-    logits = torch.tensor([100.0, 99.0, 1.0, 0.0])
-    out = solutions.top_p_probs(logits, top_p=0.9, temperature=1.0)
-    assert torch.isfinite(out).all(), 'output must stay finite for large logits'
-    _assert_close(out.sum(), torch.tensor(1.0))
-    expected = torch.tensor([0.73105860, 0.26894143, 0.0, 0.0])
-    _assert_close(out, expected)
-
-
 TOP_P_PROBS_TESTS = [
-    ScoredTest('returns a same-shape probability vector that sums to 1', 4, _top_p_probs_sums_and_shape),
-    ScoredTest('matches top-p filtering and preserves token order', 5, _top_p_probs_matches_reference_and_preserves_order),
-    ScoredTest('temperature changes the distribution correctly', 4, _top_p_probs_temperature_changes_distribution),
-    ScoredTest('validates inputs and keeps at least one token', 4, _top_p_probs_validates_inputs_and_keeps_one_token),
-    ScoredTest('stays numerically stable for large logits', 3, _top_p_probs_is_numerically_stable),
+    ScoredTest('returns a same-shape probability vector that sums to 1', 3, _top_p_probs_sums_and_shape),
+    ScoredTest('matches top-p filtering and preserves token order', 4, _top_p_probs_matches_reference_and_preserves_order),
+    ScoredTest('min_tokens_to_keep expands a tiny nucleus', 5,
+               _top_p_probs_min_tokens_floor_expands_tiny_nucleus),
+    ScoredTest('top_p can keep more tokens than the minimum floor', 4,
+               _top_p_probs_top_p_can_keep_more_than_minimum),
+    ScoredTest('validates min_tokens_to_keep and caps it at vocab size', 4,
+               _top_p_probs_validates_min_tokens_and_caps_at_vocab_size),
 ]
 
 
-# Question 6: apply_bpe_merge — 20 points.
-def _bpe_basic_merges():
+# Question 6: apply_bpe_merge and bpe_encode — 20 points.
+def _bpe_merge_basic_left_to_right():
     solutions = load_solutions('apply_bpe_merge')
     assert solutions.apply_bpe_merge(['a', 'b', 'a', 'b'], ('a', 'b')) == ['ab', 'ab']
     assert solutions.apply_bpe_merge(['l', 'o', 'w', 'e', 's', 't'], ('e', 's')) == ['l', 'o', 'w', 'es', 't']
-    assert solutions.apply_bpe_merge(['a', 'b', 'a', 'b', 'a', 'b'], ('a', 'b')) == ['ab', 'ab', 'ab']
 
 
-def _bpe_non_overlapping_single_pass():
+def _bpe_merge_non_overlapping_single_pass():
     solutions = load_solutions('apply_bpe_merge')
-    # Non-overlapping, left to right.
     assert solutions.apply_bpe_merge(['a', 'a', 'a', 'a'], ('a', 'a')) == ['aa', 'aa']
     assert solutions.apply_bpe_merge(['a', 'a', 'a'], ('a', 'a')) == ['aa', 'a']
-    # A token produced by a merge must not be merged again in the same pass.
-    assert solutions.apply_bpe_merge(['a', 'a', 'b'], ('a', 'a')) == ['aa', 'b']
-    assert solutions.apply_bpe_merge(['t', 'h', 'e', 'h', 'e'], ('h', 'e')) == ['t', 'he', 'he']
+    assert solutions.apply_bpe_merge(['a', 'a', 'a', 'a', 'a'], ('a', 'a')) == ['aa', 'aa', 'a']
 
 
-def _bpe_edge_cases_and_no_mutation():
+def _bpe_merge_edge_cases_no_mutation():
     solutions = load_solutions('apply_bpe_merge')
     assert solutions.apply_bpe_merge([], ('a', 'b')) == []
     assert solutions.apply_bpe_merge(['x', 'y', 'z'], ('a', 'b')) == ['x', 'y', 'z']
-    assert solutions.apply_bpe_merge(['a'], ('a', 'b')) == ['a']
-    original = ['a', 'b', 'a', 'b']
-    solutions.apply_bpe_merge(original, ('a', 'b'))
-    assert original == ['a', 'b', 'a', 'b'], 'input list must not be mutated'
+    original = ['a', 'a', 'a']
+    solutions.apply_bpe_merge(original, ('a', 'a'))
+    assert original == ['a', 'a', 'a'], 'input list must not be mutated'
+
+
+def _bpe_encode_priority_loop_beats_single_pass_list_order():
+    solutions = load_solutions('bpe_encode')
+    tokens = ['a', 'b', 'c']
+    merges = [('ab', 'c'), ('a', 'b')]
+    assert solutions.bpe_encode(tokens, merges) == ['abc']
+    assert tokens == ['a', 'b', 'c'], 'input list must not be mutated'
+
+
+def _bpe_encode_cascades_merged_tokens():
+    solutions = load_solutions('bpe_encode')
+    assert solutions.bpe_encode(['a', 'b', 'c', 'a', 'b'], [('a', 'b'), ('ab', 'c')]) == ['abc', 'ab']
+    assert solutions.bpe_encode(['a', 'a', 'a', 'a'], [('a', 'a'), ('aa', 'aa')]) == ['aaaa']
+
+
+def _bpe_encode_empty_no_match_and_terminates():
+    solutions = load_solutions('bpe_encode')
+    assert solutions.bpe_encode(['a', 'b'], []) == ['a', 'b']
+    assert solutions.bpe_encode(['x', 'y', 'z'], [('a', 'b'), ('b', 'c')]) == ['x', 'y', 'z']
+    assert solutions.bpe_encode([], [('a', 'b')]) == []
 
 
 BPE_MERGE_TESTS = [
-    ScoredTest('merges adjacent pairs left to right', 6, _bpe_basic_merges),
-    ScoredTest('is non-overlapping and applies a single pass', 7, _bpe_non_overlapping_single_pass),
-    ScoredTest('handles empty/no-match inputs without mutating the input', 7, _bpe_edge_cases_and_no_mutation),
+    ScoredTest('apply_bpe_merge merges adjacent pairs left to right', 3, _bpe_merge_basic_left_to_right),
+    ScoredTest('apply_bpe_merge is non-overlapping and single-pass', 3, _bpe_merge_non_overlapping_single_pass),
+    ScoredTest('apply_bpe_merge handles edge cases without mutating input', 2, _bpe_merge_edge_cases_no_mutation),
+    ScoredTest('bpe_encode uses ranked iterative BPE, not one-pass list order', 5,
+               _bpe_encode_priority_loop_beats_single_pass_list_order),
+    ScoredTest('bpe_encode lets merged tokens cascade into later merges', 4,
+               _bpe_encode_cascades_merged_tokens),
+    ScoredTest('bpe_encode handles empty/no-match cases and terminates', 3,
+               _bpe_encode_empty_no_match_and_terminates),
 ]
 
 
