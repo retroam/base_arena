@@ -437,16 +437,6 @@ ALL_TEST_GROUPS = [
 ]
 
 
-def _score_band(score_percent):
-    if score_percent >= 90:
-        return 'strong readiness'
-    if score_percent >= 75:
-        return 'ready for the fellowship'
-    if score_percent >= 60:
-        return 'promising foundation; extra prep recommended'
-    return 'more Python/PyTorch practice recommended before the fellowship pace'
-
-
 def run_integer_container_tests():
     return _run_scored_tests(INTEGER_CONTAINER_TESTS)
 
@@ -489,7 +479,8 @@ def run_all_tests():
 
     percent = 100 * earned / total if total else 0
     print(f'Total public score: {earned}/{total} ({percent:.1f}%)')
-    print(f'Score band: {_score_band(percent)}')
     if failed:
-        print('Some tests failed. Partial credit is shown above; fix what you can and submit when ready.')
+        print('Result: Some public tests failed.')
+    else:
+        print('Result: All public tests passed.')
     return earned, total
